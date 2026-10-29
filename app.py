@@ -152,44 +152,121 @@ def interpolate_points(stations, max_points=100):
 
 
 # ---------------------------------------------------------
-# Geocoding Service (Nominatim with 1s rate limit & cache)
+# Geocoding Service (Resilient Multi-Layer OSM Geocoder)
 # ---------------------------------------------------------
+# Built-in lookup table for major Indian Railway stations (0ms, 100% cloud reliable)
+PRELOADED_STATIONS = {
+    "new delhi": (28.6138954, 77.2090057, "New Delhi Railway Station, Delhi, India"),
+    "delhi": (28.661898, 77.227396, "Old Delhi Railway Station, Delhi, India"),
+    "kanpur central": (26.4538613, 80.3512433, "Kanpur Central Railway Station, Uttar Pradesh, India"),
+    "kanpur": (26.4538613, 80.3512433, "Kanpur Central Railway Station, Uttar Pradesh, India"),
+    "prayagraj junction": (25.4454322, 81.8259580, "Prayagraj Junction, Uttar Pradesh, India"),
+    "prayagraj": (25.4454322, 81.8259580, "Prayagraj Junction, Uttar Pradesh, India"),
+    "allahabad": (25.4454322, 81.8259580, "Prayagraj (Allahabad) Junction, Uttar Pradesh, India"),
+    "varanasi junction": (25.3275678, 82.9862450, "Varanasi Junction Railway Station, Uttar Pradesh, India"),
+    "varanasi": (25.3275678, 82.9862450, "Varanasi Junction Railway Station, Uttar Pradesh, India"),
+    "mumbai central": (18.9696, 72.8193, "Mumbai Central Railway Station, Maharashtra, India"),
+    "csmt": (18.9402, 72.8356, "Chhatrapati Shivaji Maharaj Terminus, Mumbai, India"),
+    "howrah junction": (22.5839, 88.3426, "Howrah Junction Railway Station, West Bengal, India"),
+    "howrah": (22.5839, 88.3426, "Howrah Junction Railway Station, West Bengal, India"),
+    "chennai central": (13.0827, 80.2755, "Chennai Central Railway Station, Tamil Nadu, India"),
+    "bengaluru city": (12.9781, 77.5695, "KSR Bengaluru City Railway Station, Karnataka, India"),
+    "ahmedabad junction": (23.0232, 72.6006, "Ahmedabad Junction, Gujarat, India"),
+    "lucknow nr": (26.8322, 80.9234, "Lucknow Charbagh Railway Station, Uttar Pradesh, India"),
+    "lucknow": (26.8322, 80.9234, "Lucknow Charbagh Railway Station, Uttar Pradesh, India"),
+    "patna junction": (25.6022, 85.1376, "Patna Junction Railway Station, Bihar, India"),
+    "jaipur junction": (26.9196, 75.7878, "Jaipur Junction Railway Station, Rajasthan, India"),
+    "gorakhpur junction": (26.7606, 83.3732, "Gorakhpur Junction, Uttar Pradesh, India"),
+    "chandigarh": (30.7046, 76.8156, "Chandigarh Junction Railway Station, India"),
+    "bhopal junction": (23.2685, 77.4126, "Bhopal Junction Railway Station, Madhya Pradesh, India"),
+    "nagpur junction": (21.1524, 79.0882, "Nagpur Junction Railway Station, Maharashtra, India"),
+    "pune junction": (18.5289, 73.8744, "Pune Junction Railway Station, Maharashtra, India"),
+}
+
 NOMINATIM_HEADERS = {
-    "User-Agent": "RailGaadi/1.0 (shorya.mehta23@jssaten.ac.in)"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 RailGaadi/1.0 (shorya.mehta23@jssaten.ac.in)"
 }
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def geocode_station_nominatim(station_query: str):
     """
-    Geocode a station name using OpenStreetMap Nominatim.
-    Adheres strictly to Nominatim terms: max 1 req/sec and custom User-Agent.
+    Geocode a station name using resilient multi-tier providers:
+    1. Built-in fast Indian railway station registry (handles cloud IP restrictions).
+    2. OpenStreetMap Nominatim with polite 1.0s throttling.
+    3. OpenStreetMap Photon API (high-availability OSM geocoder).
+    4. Open-Meteo Geocoding API as backup.
     """
-    time.sleep(1.0)  # Strict rate limit compliance: 1 request per second
-    endpoint = "https://nominatim.openstreetmap.org/search"
-    clean_query = station_query.strip()
+    clean_query = station_query.strip().lower()
 
-    # Search queries to try
+    # Tier 1: Instant built-in registry
+    if clean_query in PRELOADED_STATIONS:
+        lat, lon, display = PRELOADED_STATIONS[clean_query]
+        return lat, lon, display
+
+    # Tier 2: OpenStreetMap Nominatim
+    time.sleep(1.0)  # Throttling compliance: 1 request per second
+    endpoint_nom = "https://nominatim.openstreetmap.org/search"
     queries_to_try = [
-        f"{clean_query}, India",
-        f"{clean_query} railway station, India",
-        clean_query,
+        f"{station_query.strip()}, India",
+        f"{station_query.strip()} railway station, India",
+        station_query.strip(),
     ]
 
     for q in queries_to_try:
         try:
             resp = requests.get(
-                endpoint,
+                endpoint_nom,
                 params={"q": q, "format": "json", "limit": 1},
                 headers=NOMINATIM_HEADERS,
-                timeout=10,
+                timeout=8,
             )
             if resp.status_code == 200:
                 results = resp.json()
                 if results and len(results) > 0:
                     first = results[0]
-                    return float(first["lat"]), float(first["lon"]), first.get("display_name", clean_query)
+                    return float(first["lat"]), float(first["lon"]), first.get("display_name", station_query.strip())
         except requests.exceptions.RequestException:
-            continue
+            pass
+
+    # Tier 3: OpenStreetMap Photon API (by Komoot, uses OSM data, resilient to cloud IPs)
+    try:
+        resp_photon = requests.get(
+            "https://photon.komoot.io/api/",
+            params={"q": station_query.strip(), "limit": 1},
+            headers=NOMINATIM_HEADERS,
+            timeout=8,
+        )
+        if resp_photon.status_code == 200:
+            p_data = resp_photon.json()
+            features = p_data.get("features", [])
+            if features:
+                coords = features[0]["geometry"]["coordinates"]
+                prop = features[0].get("properties", {})
+                name_disp = prop.get("name") or station_query.strip()
+                return float(coords[1]), float(coords[0]), f"{name_disp}, India"
+    except requests.exceptions.RequestException:
+        pass
+
+    # Tier 4: Open-Meteo Geocoding API (global backup)
+    try:
+        # Strip common station suffixes like "Junction", "Central", "Cantt"
+        simplified_name = station_query.strip()
+        for suffix in ["Junction", "Central", "Cantt", "Terminal", "Jn", "City"]:
+            simplified_name = simplified_name.replace(suffix, "").strip()
+
+        resp_om = requests.get(
+            "https://geocoding-api.open-meteo.com/v1/search",
+            params={"name": simplified_name, "count": 1, "language": "en", "format": "json"},
+            headers=NOMINATIM_HEADERS,
+            timeout=8,
+        )
+        if resp_om.status_code == 200:
+            om_data = resp_om.json()
+            if "results" in om_data and om_data["results"]:
+                first = om_data["results"][0]
+                return float(first["latitude"]), float(first["longitude"]), f"{first['name']}, {first.get('country', '')}"
+    except requests.exceptions.RequestException:
+        pass
 
     return None, None, None
 
