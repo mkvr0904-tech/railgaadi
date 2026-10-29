@@ -696,9 +696,38 @@ with tab_status:
 
         # Render response data cleanly if available
         if isinstance(data, dict):
-            curr_stn = data.get("current_station_name") or data.get("current_station") or data.get("station_name", "N/A")
-            delay = data.get("delay") or data.get("delay_in_minutes") or data.get("delay_minutes", 0)
-            status_msg = data.get("status") or data.get("status_as_of") or data.get("position", "In Transit")
+            # Check for commonly nested wrappers (e.g. data, result, body, response)
+            inner = data
+            for wrap_key in ["data", "result", "body", "response"]:
+                if isinstance(data.get(wrap_key), dict):
+                    inner = data[wrap_key]
+                    break
+
+            curr_stn = (
+                inner.get("current_station_name")
+                or inner.get("current_station")
+                or inner.get("station_name")
+                or inner.get("current_location_name")
+                or inner.get("station")
+                or data.get("current_station_name")
+                or "In Transit / Tracking"
+            )
+            delay = (
+                inner.get("delay")
+                or inner.get("delay_in_minutes")
+                or inner.get("delay_minutes")
+                or inner.get("late_minutes")
+                or data.get("delay")
+                or 0
+            )
+            status_msg = (
+                inner.get("status")
+                or inner.get("status_as_of")
+                or inner.get("position")
+                or inner.get("train_status")
+                or data.get("status")
+                or "Active"
+            )
 
             col_m1, col_m2, col_m3 = st.columns(3)
             with col_m1:
